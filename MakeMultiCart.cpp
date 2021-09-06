@@ -30,6 +30,8 @@ unsigned char getPadChar() {
 
 int main(int argc, char *argv[])
 {
+    printf("Version 1.1\n");
+
     if (argc < 3) {
         printf("Pass the path of a folder containing only EA#5 files in TIFILES format (others will be ignored)\n");
         printf("and the output file to write (will be non-inverted bankswitched ROM)\n");
@@ -94,8 +96,8 @@ int main(int argc, char *argv[])
     header[hdrpos++] = 0x01;
     header[hdrpos++] = 0x00;    // program count
     header[hdrpos++] = 0x00;
-    header[hdrpos++] = 0x00;    // powerups
-    header[hdrpos++] = 0x00;
+    header[hdrpos++] = 0x87;    // powerups (we set to >8765 as a flag)
+    header[hdrpos++] = 0x65;
     header[hdrpos++] = 0x60;    // program list
     header[hdrpos++] = 0x26;
     header[hdrpos++] = 0x00;    // DSRs
