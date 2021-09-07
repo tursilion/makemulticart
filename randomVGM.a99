@@ -1,0 +1,214 @@
+* This code runs inside the main menu selection, so we know where
+* on the cartridge it is (assuming it's built with my tools)
+* It makes a lot of assumptions, so it will not work with other random programs.
+
+* better to just force assume addresses, once I know how big it is
+	aorg >7e80
+	b @start		* jump over the subroutines
+	
+**
+* RND - RETURN RANDOM NUMBER IN R0 
+RNDSED	EQU  >8320				* current seed
+RMASK	DATA >B400				* mask for 16 bit random numbers
+RND		MOV  @RNDSED,R0         * Get seed
+		SRL  R0,1				* shift down
+		JNC  RAND01				* jump if 1 not shifted out
+		XOR  @RMASK,R0			* XOR the top half
+RAND01	MOV  R0,@RNDSED         * Save this number for next time 
+		B    *R11 
+
+**
+* fetch - get word from page r0, address r1 into r2
+* copied to scratchpad when used
+FETCH
+	mov r0,*r0
+	mov *r1,r2
+	mov r0,@>6002
+	b *r11
+	
+* program starts here
+* we need to run whether it's first call or subsequent calls
+* I'm going to store my random seed at VDP >3FFE, since that's
+* usually part of the disk system, which we don't use.
+* hopefully no viz messes with it... if one does we could get into a loop
+start
+	lwpi >83e0			* we can't use the C workspace, we use that for code
+	li r0,>3ffe			* VDP address last used for the seed
+	SWPB R0
+	MOVB R0,@>8C02		* swapped address
+	SWPB R0
+	MOVB R0,@>8C02		* set address
+	MOV R0,R0			* delay
+	MOVB @>8800,R1		* read first byte
+	SWPB R1
+	MOVB @>8800,R1		* read second byte
+	SWPB R1
+
+	mov r1,r1			* not allowed to be 0
+	jne s1
+	mov @>83c0,r1		* get console random number
+	jne s1
+	li r1,>5432			* still zero? fine, fixed seed
+s1
+	mov r1,@rndsed		* save it
+
+* we know how many programs we have, so get that
+	bl @rnd				* random number in r0
+	mov r0,r1
+	
+	movb @>6002,r2		* get the program count byte
+	srl r2,8			* make a word
+	clr r0				* r0,r1 is now a 32-bit value
+	div r2,r0			* r0=result, r1=remainder (the value we want)
+	
+* the first entry is at 6032, and each entry is intentionally 26 bytes long
+	li r0,26
+	mpy r0,r1			* multiply that, and /r2/ is now an offset
+	ai r2,>6034			* now it's an address - this is the boot address (6032+2) we want for the visualizer
+	mov *r2,r6			* get that address
+	
+* we want to execute the first copy only, so we just extract the addresses
+* the code looks like:
+* li r0,page
+* li r1,src
+* li r2,dst
+* li r3,size
+* bl @copy
+* we need /all/ of those addresses here, but we can just blindly pull them
+	mov @2(r6),r0		* page number
+	mov @6(r6),r1		* src adr
+	mov @10(r6),r2		* dst adr
+	mov r2,r12			* save this for later! We need it, and so does the final copy code!
+	mov @16(r6),r3		* count
+	mov @20(r6),r4		* address of copy function
+	bl *r4				* call the copy - now the program is loaded to low RAM - 1,2,3,4,5 destroyed
+
+* blank out the text data area
+* blank it all, then we don't have to worry if we later copy less
+* the number of available rows is at offset 2 (in the LIMI instruction!!)
+* and the address of the text table is at offset 0x32 (0xb8-128-6)
+	mov r12,r2			* base address of exe
+	inct r2				* offset 2
+	movb *r2,r2			* fetch value
+	jeq dnbl			* no blanking if its zero (probably incompatible file)
+	srl r2,8			* make word (dont optimize this, it zeros the extra bits)
+	sla r2,4			* multiply by 16 for word count
+	mov r2,r10			* save for later
+	mov r12,r1			* base again
+	ai r1,>0032			* offset
+	mov *r1,r1			* get offset of text area
+	a r12,r1			* make address
+	mov r1,r8			* remember this one too
+	li r0,>2020			* space characters
+bllp
+	mov r0,*r1+
+	dec r2
+	jne bllp
+dnbl
+
+* now find the flags section, and set it to call us back for random play
+* we have to do this here, not in the cart creator, or all tunes will
+* always be random after the first one ends, even if the user didn't pick random
+	mov r12,r0			* start address to search
+sflp
+	li r1,>7e7e			* first match - ~~
+sflg
+	c *r0+,r1
+	jeq sflg1
+	ci r0,>3ff0
+	jne sflg
+	jmp sfno
+
+sflg1
+	li r1,>464C			* next - FL
+	c *r0,r1
+	jne sflp			* nope, keep trying
+
+	inct r0
+	li r1,>4147			* next - AG
+	c *r0,r1
+	jne sflp			* nope, keep trying
+
+sflg3
+	ai r0,10			* found it - point to chain word
+	li r1,>6002			* our page for random
+	mov r1,*r0			* store it
+
+* come here when done, or not found
+sfno
+	
+* now we are going to do very similar for the data that we select
+* we know how many programs we have, so get that
+	bl @rnd				* random number in r0
+	mov r0,r1
+	li r0,>7ffe			* write it back to VDP for next time
+
+	SWPB R0
+	MOVB R0,@>8C02
+	SWPB R0
+	MOVB R0,@>8C02		* set address
+	MOVB R1,@>8C00		* write data 1
+	SWPB R1
+	MOVB R1,@>8C00		* write data 2
+	SWPB R1
+	
+	movb @>6002,r2		* get the program count byte
+	srl r2,8			* make a word
+	clr r0				* r0,r1 is now a 32-bit value
+	div r2,r0			* r0=result, r1=remainder (the value we want)
+	
+* the first entry is at 6032, and each entry is intentionally 26 bytes long
+	li r0,26
+	mpy r0,r1			* multiply that, and /r2/ is now an offset
+	ai r2,>6034			* now it's an address - this is the boot address (6032+2) we want for the visualizer
+	mov *r2,r6			* get that address
+
+* although we don't want the PROGRAM data, we need to copy over the TEXT data
+* r6 = start of first copy loop for new code
+* r8 = address of text area in RAM
+* r12 = base of exe (add 2 to get the row count)
+
+* copy FETCH to scratchpad
+	li r0,FETCH
+	li r1,>8300
+	mov *r0+,*r1+
+	mov *r0+,*r1+
+	mov *r0+,*r1+
+	mov *r0+,*r1+
+	mov *r0+,*r1+
+
+	mov @2(r6),r0		* page number of target program
+	mov @6(r6),r3		* cartridge address of src program
+	mov r3,r1
+	inct r1				* offset 2 - number of rows
+	bl @>8300			* fetch into r2
+	srl r2,8			* make word
+	jeq nocopy			* no source data
+	mov r10,r4			* get target space in words (from earlier)
+	jeq nocopy			* no target space
+	sla r2,4			* multiply rows by 16 for words
+	c r4,r2
+	jle ok1
+	mov r2,r4			* r4 now has the lower of the two counts
+ok1
+
+	mov r3,r1
+	ai r1,>0032			* offset of offset to src text area
+	bl @>8300			* fetch it
+	mov r2,r1
+	a r3,r1				* make it an address
+
+* now copy the rows of text
+cplp2
+	bl @>8300			* fetch two bytes
+	inct r1
+	mov r2,*r8+			* write it to RAM
+	dec r4				* one word copied
+	jne cplp2
+nocopy
+
+* this time we just need to skip ahead one entry in the copy code
+	ai r6,22			* skip the first copy
+	b *r6				* and do the rest
+	
+	END

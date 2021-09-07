@@ -9,14 +9,15 @@
 #include <algorithm>
 #include <errno.h>
 #include "multimenu.h"
+#include "random.h"
 
 using namespace std;
 vector<string> filenames;
 unsigned char buf[8192+6+128];    // max size (8k+6+128 6 bytes header, should be 8192, but some software was buggy, plus 128 bytes TIFILES)
 
-unsigned char header[4096];
+unsigned char header[8192];
 int hdrpos = 0;
-unsigned char copydat[4096];
+unsigned char copydat[8192];    // header+copydat must be less than 8192
 int copypos = 0;
 unsigned char datadat[8192*64];   // 512kb
 int datapos = 0;
@@ -106,10 +107,10 @@ int main(int argc, char *argv[])
     header[hdrpos++] = 0x00;
 
     // we also put trampoline code here so there is a fixed address to copy it from
-    // bl @>600c, data >address
-    header[hdrpos++] = 0xc2;    // mov *r11,r11
-    header[hdrpos++] = 0xdb;
-    header[hdrpos++] = 0x02;    // li r4,>6020
+    // li r12,target ; bl @>600e
+    header[hdrpos++] = 0x10;    // nop (so everything lines up still)
+    header[hdrpos++] = 0x00;
+    header[hdrpos++] = 0x02;    // li r4,>6020  (this is 600E)
     header[hdrpos++] = 0x04;
     header[hdrpos++] = 0x60;
     header[hdrpos++] = 0x20;
@@ -128,21 +129,76 @@ int main(int argc, char *argv[])
     header[hdrpos++] = 0x83;
     header[hdrpos++] = 0x00;
 
-    // 0x6020
-    header[hdrpos++] = 0xc8;    // mov r0,@>6000    this runs from scratchpad
+    // 0x6020 - this runs from scratchpad
+    header[hdrpos++] = 0xc8;    // mov r0,@>6000  - reset bank to boot bank
     header[hdrpos++] = 0x00;
     header[hdrpos++] = 0x60;
     header[hdrpos++] = 0x00;
-    header[hdrpos++] = 0x04;    // b *r11
-    header[hdrpos++] = 0x5b;
+    header[hdrpos++] = 0x04;    // b *r12 - jump to code in RAM
+    header[hdrpos++] = 0x5c;
 
-    // 0x6026
+    // 0x6026 - this is the first program, it must be RANDOM, so we hard code that
+    header[hdrpos++] = 0x60;    // link to next program
+    header[hdrpos++] = 0x32;
+    header[hdrpos++] = 0x7e;    // address of RANDOM, always >7e80
+    header[hdrpos++] = 0x80;
+    header[hdrpos++] = 0x06;    // length of name
+    header[hdrpos++] = 'R';     // name
+    header[hdrpos++] = 'A';     // name
+    header[hdrpos++] = 'N';     // name
+    header[hdrpos++] = 'D';     // name
+    header[hdrpos++] = 'O';     // name
+    header[hdrpos++] = 'M';     // name
+    header[hdrpos++] = 0x00;    // filler
+
+    // 0x6032
 
     // it just makes life easier if copypos does not start at zero
     copydat[copypos++] = 0x54;  // TI
     copydat[copypos++] = 0x49;
 
-    int boot = 0;
+    // pre-scan the files to see that they are all good for the random tool
+    // the ~~FLAG exists in the first 8k of all tools, so easy search
+    bool randomOk = true;
+    for (string s : filenames) {
+        FILE *fp = fopen(s.c_str(), "rb");
+        if (NULL == fp) {
+            // shouldn't happen now! Damn multitasking OS!
+            printf("Late fail to open %s, error %d??\n", s.c_str(), errno);
+            return 1;
+        }
+        // read it in
+        int sz = fread(buf, 1, sizeof(buf), fp);
+        fclose(fp);
+
+        // check the EA5 header, make sure that the address is in the low bank
+        int eaLoad = buf[128+4]*256+buf[128+5];
+        if ((eaLoad >= 0x2000) && (eaLoad < 0x4000)) {
+            // check to ensure that the flags exist, if not, then we
+            // can't trust the program to function
+            bool testRandomOk = false;
+            for (int idx=128+6; idx<128+6+8192; ++idx) {
+                if (0 == memcmp(&buf[idx], "~~FLAG", 6)) {
+                    testRandomOk = true;
+                    break;
+                }
+            }
+            if (!testRandomOk) {
+                printf("Random disabled by incompatible file: %s\n", s.c_str());
+                randomOk = false;
+            }
+        }
+        if (!randomOk) break;
+    }
+    if (!randomOk) {
+        printf("Disabling RANDOM entry, not all programs are compatible\n");
+        // just mask off the random entry, everything else can stay the same
+        header[7] = 0x32;   // skip the RANDOM entry
+    } else {
+        printf("All entries qualify, enabling RANDOM entry\n");
+    }
+
+    int progCnt = 0;
     bool first = true;
     for (string s : filenames) {
         FILE *fp = fopen(s.c_str(), "rb");
@@ -158,7 +214,7 @@ int main(int argc, char *argv[])
         // remove TIFILES header
         memmove(buf, buf+128, sz-128);
         sz-=128;
-        
+
         // parse the EA5 header
         int eaMore = buf[0]*256+buf[1];
         int eaSize = (buf[2]*256+buf[3]+1)/2;   // convert from bytes to words
@@ -166,10 +222,8 @@ int main(int argc, char *argv[])
         if (first) {
             printf("Processing %s...\n", s.c_str());
 
-            // save the boot address
-            boot = eaLoad;
-            
             // add an entry to the header
+            ++progCnt;
             header[hdrpos] = (hdrpos+26+0x6000)/256;    // next entry (will zero later if needed)
             header[hdrpos+1] = (hdrpos+26+0x6000)%256;
             hdrpos += 2;
@@ -177,6 +231,25 @@ int main(int argc, char *argv[])
             header[hdrpos++] = copypos%256;
             header[hdrpos++] = 20;                      // always 20 bytes of filename to allow hex editing
             
+#if 0
+            // don't do this here, the random program needs to. Otherwise ALL programs
+            // will be random, even if the user didn't ask for it
+
+            // patch the flags for chaining if randomOk
+            if ((randomOk) && (eaLoad >= 0x2000) && (eaLoad < 0x4000)) {
+                // check to ensure that the flags exist, if not, then we
+                // can't trust the program to function
+                for (int idx=128+6; idx<128+6+8192; ++idx) {
+                    if (0 == memcmp(&buf[idx], "~~FLAG", 6)) {
+                        // here it is
+                        buf[idx+14] = 0x60;     // hard coded page for this entry
+                        buf[idx+15] = 0x02;
+                        break;
+                    }
+                }
+            }
+#endif
+
             //printf("  ... at copy offset >%04X\n", copypos);
 
             // strip any path off the filename
@@ -198,9 +271,9 @@ int main(int argc, char *argv[])
             // padding byte to make even and make easier to hex edit by showing the boundary
             header[hdrpos++] = 0xff;
 
-            // update the flag
-            first = false;
+            // we need to check one more time, we'll set it to false there)
         }
+        printf("  more:%d size:>%04X load:>%04X\n", eaMore?1:0, eaSize*2, eaLoad);
 
         // remove EA5 header
         memmove(buf, buf+6, sz-6);
@@ -243,6 +316,15 @@ int main(int argc, char *argv[])
         copydat[copypos++] = eaLoad/256;
         copydat[copypos++] = eaLoad%256;
 
+        if (first) {
+            // update the flag
+            first = false;
+            copydat[copypos++] = 0xc3;      // mov r2,r12 (save boot address for later)
+            copydat[copypos++] = 0x02;
+
+            printf("  -> boot address: >%04X\n", eaLoad);
+        }
+
         copydat[copypos++] = 0x02;      // li r3,size
         copydat[copypos++] = 0x03;
         copydat[copypos++] = eaSize/256;
@@ -255,17 +337,18 @@ int main(int argc, char *argv[])
 
         if (eaMore == 0) {
             // this was the last file in the list, so load the boot code
-            copydat[copypos++] = 0x06;  // bl @>600c
-            copydat[copypos++] = 0xa0;
+            copydat[copypos++] = 0x04;  // b @>600e
             copydat[copypos++] = 0x60;
-            copydat[copypos++] = 0x0c;
-            copydat[copypos++] = boot/256;  // data boot
-            copydat[copypos++] = boot%256;
+            copydat[copypos++] = 0x60;
+            copydat[copypos++] = 0x0e;
 
             // next file will be first again
             first = true;
         }
     }
+
+    // update the program count, the random entry needs it
+    header[2] = progCnt&0xff;
 
     if (!first) {
         printf("Warning, last file did not set final load flags...\n");
@@ -275,8 +358,8 @@ int main(int argc, char *argv[])
     header[hdrpos-26] = 0;
     header[hdrpos-25] = 0;
 
-    // patch the boot addresses
-    int off = 0x26 + 2;
+    // patch the boot addresses of the generated code
+    int off = 0x32 + 2;
     while (header[off]*256+header[off+1] != 0) {
         int oldoff = header[off]*256+header[off+1];
         int newoff = oldoff + (hdrpos+0x6000);
@@ -346,6 +429,12 @@ int main(int argc, char *argv[])
     copydat[copypos++] = 0x04;              // b *r11
     copydat[copypos++] = 0x5b;
 
+    // and copy RANDOM in at that address
+    if (copypos+hdrpos > 8192-256-128) {
+        printf("Cartridge has too many images - not enough space in load page\n");
+        return 1;
+    }
+
     // now we can build the ROM
 
     // pad data to a full page
@@ -391,6 +480,8 @@ int main(int argc, char *argv[])
     memcpy(datadat+8192, header, hdrpos);
     // then the copy code
     memcpy(datadat+hdrpos+8192, copydat, copypos);
+    // and the random code
+    memcpy(datadat+8192+0x1e80, RANDOM, SIZE_OF_RANDOM);
 
     // copy in the multicart menu binary to the first bank
     memcpy(datadat, MULTIMENU, SIZE_OF_MULTIMENU);

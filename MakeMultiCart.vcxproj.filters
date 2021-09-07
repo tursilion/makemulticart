@@ -23,5 +23,13 @@
     <ClInclude Include="multimenu.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="random.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="randomVGM.a99">
+      <Filter>Source Files</Filter>
+    </None>
   </ItemGroup>
 </Project>
