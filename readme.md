@@ -11,3 +11,5 @@ Input files must be EA#5 files with TIFILES headers. Place all of them in a fold
 makemulticart c:\myfolder\ c:\output\cartridge8.bin
 
 I heavily recommend the "8.bin" ending. It will be automatically added if you don't end with .bin
+
+-- As of 9/7/2021 there is a new version with a random option, you MUST use today's also-released version of vgmcomp2's Quickplayer for it to work!
